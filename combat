@@ -1,0 +1,302 @@
+local module = {}
+--// Services
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService('Debris')
+--//Assets
+local FX = ReplicatedStorage.Assets:WaitForChild("Shoot")
+local BlockAnimation = script.BlockANimaton
+local ParryAnimation = script.ParryAnimation
+
+--//Variables
+local Combo = {}
+local currentBlockAnim = nil
+
+--// Modules
+local Cooldown = require(ReplicatedStorage.Modules.Util.CooldownManager)
+local hitbox = require(script.MuchachoHitbox)
+
+--// Remotes
+local SomethingRemote = ReplicatedStorage.Remotes:WaitForChild("RemoteEvent")
+
+--// Functions
+local function EmitAll(Ins)
+	-- goes through Ins and emits everything thats a particle emitter in ins
+	for _, ins in pairs(Ins:GetDescendants()) do
+		if ins:IsA("ParticleEmitter") then
+			ins:Emit(2)
+		end
+	end
+end
+
+local function anim(Player, anim)
+	
+	-- load and play the animation
+	local Character = Player.Character
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+	local animTrack = hum:LoadAnimation(anim)
+	animTrack:Play()
+	return animTrack
+end
+
+
+local function SetStun(Character)
+	-- Sets stun and if stunned our walkspeed and jump height decreases
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+
+	Character:SetAttribute("Stunned", true)
+	if Character:GetAttribute("Stunned") then
+		hum.WalkSpeed = 3
+		hum.JumpHeight = 0
+	end
+end
+
+local function ResetStun(Player)
+	-- Removes the stun and sets the walkspeed and jumpheight to what it regularly is
+	local Character = Player.Character
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+
+	Character:GetAttribute("Stunned", nil)
+	hum.WalkSpeed = 16
+	hum.JumpHeight = 7.2
+end
+
+
+
+local function Knockback(Hrp, Knockback)
+	-- Create a body velocity for the knockback
+	local bv = Instance.new("BodyVelocity")
+	bv.Name = "Knockback"
+	bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	bv.Velocity = Knockback
+	bv.Parent = Hrp
+	Debris:AddItem(bv, .1)
+end
+
+local function ParryHandler(OtherCharacter, Attacker)
+	-- Check if othercharacters parrying attribute is true and if it is it sets stun to the attacker and plays the parry animation for the person who parried while also making it so that the attacker cant attack for another second
+	if OtherCharacter:GetAttribute("Parrying") then
+		local root = OtherCharacter.HumanoidRootPart
+		local hum = OtherCharacter.Humanoid
+		print("Parried")
+		SetStun(Attacker)
+		Cooldown:AddCooldown("Attacking", 1)
+		Attacker:SetAttribute("Attacking", nil)
+		anim(hum, ParryAnimation)
+		return true
+	end
+	return false
+end
+
+
+function module.M1(Player)
+	-- Player variables
+	local Character = Player.Character
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+	-- Check if our attack is still on cooldown or if we are blocking and if we are then return
+	if Cooldown:CheckCooldown("Attacking") then
+		return
+	end
+	if Cooldown:CheckCooldown("Blocking") then
+		return
+	end
+	
+	Combo[Character] = not Combo[Character] and {Combo = 0, LastSwing = tick()} or Combo[Character]
+	
+	-- If the last swings was 1.5 seconds ago it sets the combo to zero or if the combo is at 5 then it sets it back to zero
+	if tick() - Combo[Character].LastSwing > 1 or Combo[Character].Combo + 1 > 5 then
+		Combo[Character].Combo = 0
+	end
+
+	Combo[Character].Combo += 1
+
+	Combo[Character].LastCombo = Combo[Character].Combo
+	Combo[Character].LastSwing = tick()
+	Character:SetAttribute('Attacking', true)
+	
+	-- Makes it so if the combo count is odd then part is left tip, and if its even its right tip
+	local part
+	if Combo[Character].Combo % 2 == 0 then
+		part = Character.Right.Tip
+	else
+		part = Character.Left.Tip
+	end
+	
+	-- Goes through the animations folder and picks the animation that corresponds with the current combo
+	local Animation = anim(Player, ReplicatedStorage.Anims['Attack' .. Combo[Character].Combo])
+	
+	Animation.Stopped:Connect(function()
+		Character:SetAttribute("Attacking", nil)
+	end)
+	
+	-- Once the animation event "Hit" occurs during the animation it runs the code below
+	Animation:GetMarkerReachedSignal("Hit"):Connect(function()
+		
+		-- Fires the gun VFX to all clients
+		SomethingRemote:FireAllClients(Character, "Effects", "M1Effect", part)
+		
+		-- Create Hitbox
+		local hb = hitbox.CreateHitbox()
+		hb.Size = Vector3.new(10, 10, 10)
+		hb.CFrame = root.CFrame
+		hb.Offset = CFrame.new(0, 0, -5)
+		hb.Visualizer = false
+		hb:Start()
+
+		hb.Touched:Connect(function(hit, hum)
+			if hit.Parent == Character then
+				return
+			end
+			local otherhrp = hit.Parent.HumanoidRootPart
+			
+			-- checks where root is relative to other hrp based on the direction other hrp is facing
+			local v1 = (root.Parent.Head.Position - otherhrp.Parent.Head.Position).Unit
+			local OtherLV = otherhrp.CFrame.LookVector
+			local dot = v1:Dot(OtherLV)
+			
+			-- If we are blocking and infront of the character it returnss
+			if hit.Parent:GetAttribute("Blocking") and dot > -0.5 then
+				return
+			end
+
+			hum.Health -= 5
+			SetStun(otherhrp.Parent)
+			-- Gets the difference between otherhrp and the attackers hrp to calculate the direction of the knockback
+			local knockback = (otherhrp.Position - Character.HumanoidRootPart.Position).Unit * 5 * Vector3.new(1,0,1)
+			if Combo[Character].Combo == 5 then
+				-- If the combo is 5 we increase the knockback
+			knockback = (otherhrp.Position - Character.HumanoidRootPart.Position).Unit * 35 * Vector3.new(1,0,1)
+			end
+			Knockback(otherhrp, knockback)
+			
+			task.delay(.4, function()
+				ResetStun(Player)
+			end)
+		
+		end)
+		task.spawn(function()
+			task.wait(.2)
+			hb:Stop()
+		end)
+	end)
+	
+
+	Cooldown:AddCooldown("Attacking", .7)
+end
+
+
+function module.Block(Player, shouldBlock)
+	local Character = Player.Character
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+	-- If we are attacking then we return
+	if Character:GetAttribute("Attacking") then
+		return
+	end
+	
+	-- If its inputbegan we set the attribute blocking to true and if its inputended we sent the attribute to nil
+	Character:SetAttribute("Blocking", shouldBlock)
+	-- if we press F we play the block animation
+	if shouldBlock then
+		
+		module.Parry(Player)
+		currentBlockAnim = anim(Player, BlockAnimation)
+		Cooldown:AddCooldown("Blocking", .5)
+	else
+		if currentBlockAnim then
+			if Cooldown:CheckCooldown("Blocking") then
+				return
+			end
+			currentBlockAnim:Stop()
+			currentBlockAnim = nil
+			--Cooldown:AddCooldown("Blocking", .5)
+		end
+	end
+end
+
+
+function module.Critical(Player)
+	
+	-- Define our Variables
+	local Character = Player.Character
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+	-- Check if our attack is still on cooldown or if we are blocking and if we are then return
+	if Cooldown:CheckCooldown("Attacking") then
+		return
+	end
+	if Cooldown:CheckCooldown("Blocking") then
+		return
+	end
+	
+	
+	-- Play the animation
+	local Animation = anim(Player, ReplicatedStorage.Anims.Critical)
+	local part = Character.Left.Tip
+	
+	Animation:GetMarkerReachedSignal("Hit"):Connect(function()
+		
+		-- Fire the effect
+		SomethingRemote:FireAllClients(Character, "Effects", "M1Effect", part)
+		 -- create hitbox
+		local hb = hitbox.CreateHitbox()
+		hb.Size = Vector3.new(10, 10, 10)
+		hb.CFrame = root.CFrame
+		hb.Offset = CFrame.new(0, 0, -5)
+		hb.Visualizer = false
+		hb:Start()
+
+		hb.Touched:Connect(function(hit, hum)
+			if hit.Parent == Character then
+				return
+			end
+			-- checks where root is relative to other hrp based on the direction other hrp is facing
+			local otherhrp = hit.Parent.HumanoidRootPart
+			local v1 = (root.Parent.Head.Position - otherhrp.Parent.Head.Position).Unit
+			local OtherLV = otherhrp.CFrame.LookVector
+			local dot = v1:Dot(OtherLV)
+			
+			hum.Health -= 5
+			SetStun(otherhrp.Parent)
+			-- Apply knockback
+			local knockback = (otherhrp.Position - Character.HumanoidRootPart.Position).Unit * 10 * Vector3.new(1,0,1)
+			Knockback(otherhrp, knockback)
+
+			task.delay(.4, function()
+				ResetStun(Player)
+			end)
+		end)
+		task.spawn(function()
+			task.wait(.2)
+			hb:Stop()
+		end)
+	end)
+
+	Cooldown:AddCooldown("Attacking", 0.7)
+
+end
+
+
+function module.Parry(Player)
+	local Character = Player.Character
+	local root = Character.HumanoidRootPart
+	local hum = Character.Humanoid
+
+	if Character:GetAttribute("Attacking") then
+		return
+	end
+	-- checks if we are blocking and if we are we add a small parry window of ,1 seconds and after that passes the parrying attribute gets set to nil
+	if Character:GetAttribute("Blocking") then
+		Character:SetAttribute("Parrying", true)
+
+		task.delay(.1, function()
+			Character:SetAttribute("Parrying", nil)
+		end)
+	end
+end
+
+
+return module
